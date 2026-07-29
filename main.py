@@ -194,9 +194,9 @@ with sync_playwright() as p:
             print(f"FAILED for {phone}: {e}")
             page.screenshot(path=f"error_{phone}.png")
 
-    # ---------------- CSV WATCH LOOP ----------------
+    # ---------------- CSV WATCH LOOP (detects delete + re-upload) ----------------
     CSV_PATH = "numbers.csv"
-    POLL_SECONDS = 5
+    POLL_SECONDS = 20
 
     def read_rows():
         """Read all current rows from the CSV. Returns a list of dicts."""
@@ -215,13 +215,34 @@ with sync_playwright() as p:
         )
 
     sent_keys = set()
+    last_mtime = None
+    file_was_missing = True  # start as "missing" so the first sighting counts as fresh
 
-    print(f"\nWatching {CSV_PATH} for new rows every {POLL_SECONDS}s.")
-    print("Add new lines (phone,message,file_path) to the CSV any time — they'll be sent automatically.")
+    print(f"\nWatching {CSV_PATH} every {POLL_SECONDS}s.")
+    print("Delete and re-upload the file with the same name any time — new rows will be sent automatically.")
     print("Press Ctrl+C to stop and close the browser.\n")
 
     try:
         while True:
+            exists = os.path.exists(CSV_PATH)
+
+            if not exists:
+                if not file_was_missing:
+                    print(f"{CSV_PATH} was removed — waiting for a new upload...")
+                file_was_missing = True
+                last_mtime = None
+                time.sleep(POLL_SECONDS)
+                continue
+
+            mtime = os.path.getmtime(CSV_PATH)
+
+            # File just reappeared (deleted -> re-uploaded) or was modified in place
+            if file_was_missing or last_mtime is None or mtime != last_mtime:
+                print(f"{CSV_PATH} detected as new/changed — treating its rows as fresh.")
+                sent_keys = set()
+                last_mtime = mtime
+                file_was_missing = False
+
             rows = read_rows()
             new_rows = [r for r in rows if row_key(r) not in sent_keys]
 
