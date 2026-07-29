@@ -65,7 +65,7 @@ with sync_playwright() as p:
             return False
 
         search_box.first.click()
-        search_box.first.fill("")  # inputs use .fill() to clear, not Ctrl+A/Delete
+        search_box.first.fill("")
         search_box.first.type(phone)
         time.sleep(0.8)
 
@@ -111,10 +111,8 @@ with sync_playwright() as p:
             raise
 
     def open_chat(phone):
-        # Try switching chats via search first — avoids a full reload
         if open_chat_via_search(phone):
             return
-        # Fallback: full page navigation, needed for first-time contacts
         open_chat_via_reload(phone)
 
     def click_visible_send_button(caption_box):
@@ -143,14 +141,12 @@ with sync_playwright() as p:
         if not is_doc and not path.lower().endswith(".mp4"):
             path = normalize_image(path)
 
-        # Step 1: open attach menu
         attach_btn = page.locator(
             'button[title="Attach"], div[title="Attach"], span[data-icon="plus-rounded"]'
         ).first
         attach_btn.wait_for(state="visible", timeout=10000)
         attach_btn.click()
 
-        # Step 2: pick "Document" or "Photos & videos", open native file dialog
         menu_label = "Document" if is_doc else "Photos & videos"
         menu_item = page.get_by_text(menu_label, exact=True)
         menu_item.wait_for(state="visible", timeout=5000)
@@ -160,7 +156,6 @@ with sync_playwright() as p:
         file_chooser = fc_info.value
         file_chooser.set_files(os.path.abspath(path))
 
-        # Step 3: wait for the media preview (image + caption box) to actually load
         preview_caption_box = page.locator(
             'div[contenteditable="true"][aria-placeholder="Add a caption"], '
             'div[contenteditable="true"][data-testid="media-caption-input"]'
@@ -172,40 +167,79 @@ with sync_playwright() as p:
             page.screenshot(path="debug_no_preview.png")
             caption_box = get_active_textbox()
 
-        # Step 4: type caption INTO the preview (same bubble as the image)
         if caption:
             clear_and_type(caption_box, caption)
 
-        # Step 5: send the combined image+caption bubble
         click_visible_send_button(caption_box)
         time.sleep(1.5)
         page.screenshot(path="debug_after_send.png")
 
-    # ---------------- MAIN LOOP ----------------
-    with open("numbers.csv", encoding="utf-8-sig") as f:
-        for row in csv.DictReader(f):
-            phone = row["phone"].strip()
-            message = row.get("message", "").strip()
-            file_path = row.get("file_path", "").strip()
+    def process_entry(phone, message, file_path):
+        """Shared send logic: sends a file+caption if file_path is given, else plain text."""
+        try:
+            open_chat(phone)
+            print(f"Chat opened: {phone}")
 
-            try:
-                open_chat(phone)
-                print(f"Chat opened: {phone}")
+            if file_path:
+                send_file_with_caption(file_path, caption=message if message else None)
+                print(f"File+caption sent to {phone}")
+            elif message:
+                send_text(message)
+                print(f"Text sent to {phone}")
+            else:
+                print(f"Nothing to send for {phone} (empty row)")
 
-                if file_path:
-                    send_file_with_caption(file_path, caption=message if message else None)
-                    print(f"File+caption sent to {phone}")
-                elif message:
-                    send_text(message)
-                    print(f"Text sent to {phone}")
-                else:
-                    print(f"Nothing to send for {phone} (empty row)")
+            time.sleep(random.uniform(3, 6))
+        except Exception as e:
+            print(f"FAILED for {phone}: {e}")
+            page.screenshot(path=f"error_{phone}.png")
 
-                time.sleep(random.uniform(3, 6))
+    # ---------------- CSV WATCH LOOP ----------------
+    CSV_PATH = "numbers.csv"
+    POLL_SECONDS = 5
 
-            except Exception as e:
-                print(f"FAILED for {phone}: {e}")
-                page.screenshot(path=f"error_{phone}.png")
+    def read_rows():
+        """Read all current rows from the CSV. Returns a list of dicts."""
+        try:
+            with open(CSV_PATH, encoding="utf-8-sig") as f:
+                return list(csv.DictReader(f))
+        except FileNotFoundError:
+            return []
 
-    print("Done.")
+    def row_key(row):
+        """Unique-ish fingerprint for a row so we know if it's already been sent."""
+        return (
+            row.get("phone", "").strip(),
+            row.get("message", "").strip(),
+            row.get("file_path", "").strip(),
+        )
+
+    sent_keys = set()
+
+    print(f"\nWatching {CSV_PATH} for new rows every {POLL_SECONDS}s.")
+    print("Add new lines (phone,message,file_path) to the CSV any time — they'll be sent automatically.")
+    print("Press Ctrl+C to stop and close the browser.\n")
+
+    try:
+        while True:
+            rows = read_rows()
+            new_rows = [r for r in rows if row_key(r) not in sent_keys]
+
+            for row in new_rows:
+                phone = row.get("phone", "").strip()
+                message = row.get("message", "").strip()
+                file_path = row.get("file_path", "").strip()
+
+                if not phone:
+                    sent_keys.add(row_key(row))
+                    continue
+
+                process_entry(phone, message, file_path)
+                sent_keys.add(row_key(row))
+
+            time.sleep(POLL_SECONDS)
+    except KeyboardInterrupt:
+        print("\nStopping watch loop...")
+
     context.close()
+    print("Browser closed.")
