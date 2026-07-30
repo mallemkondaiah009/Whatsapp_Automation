@@ -1,9 +1,12 @@
-import csv, time, random, os
+import csv, time, random, os, glob
 from PIL import Image
 from playwright.sync_api import sync_playwright
 
 profile_path = os.path.join(os.getcwd(), "whatsapp_profile")
 profile_exists = os.path.isdir(profile_path) and len(os.listdir(profile_path)) > 0
+
+WATCH_DIR = os.getcwd()          # folder to watch for .csv files
+POLL_SECONDS = 20
 
 
 def normalize_image(path, min_size=800):
@@ -37,7 +40,6 @@ with sync_playwright() as p:
         input("Scan QR if needed, then press Enter...")
 
     def get_active_textbox(timeout=15000):
-        """Return whichever contenteditable textbox is actually visible right now."""
         boxes = page.locator('div[contenteditable="true"][role="textbox"]')
         boxes.first.wait_for(state="attached", timeout=timeout)
 
@@ -59,7 +61,6 @@ with sync_playwright() as p:
         box.type(text)
 
     def open_chat_via_search(phone):
-        """Switch to an existing chat without reloading the page. Returns True if found."""
         search_box = page.locator('input[aria-label="Search or start a new chat"]')
         if search_box.count() == 0:
             return False
@@ -85,7 +86,6 @@ with sync_playwright() as p:
         return True
 
     def open_chat_via_reload(phone):
-        """Full navigation — needed for brand-new contacts with no existing chat thread."""
         page.goto(f"https://web.whatsapp.com/send?phone={phone}")
         page.wait_for_load_state("networkidle", timeout=20000)
 
@@ -104,11 +104,7 @@ with sync_playwright() as p:
             except Exception:
                 pass
 
-        try:
-            get_active_textbox()
-        except Exception:
-            page.screenshot(path=f"debug_timeout_{phone}.png")
-            raise
+        get_active_textbox()
 
     def open_chat(phone):
         if open_chat_via_search(phone):
@@ -116,7 +112,6 @@ with sync_playwright() as p:
         open_chat_via_reload(phone)
 
     def click_visible_send_button(caption_box):
-        """Find whichever send button is actually visible and click it."""
         all_send_btns = page.locator('button:has(span[data-testid="wds-ic-send-filled"])')
         send_btn = None
         for i in range(all_send_btns.count()):
@@ -164,7 +159,6 @@ with sync_playwright() as p:
             preview_caption_box.first.wait_for(state="visible", timeout=15000)
             caption_box = preview_caption_box.first
         except Exception:
-            page.screenshot(path="debug_no_preview.png")
             caption_box = get_active_textbox()
 
         if caption:
@@ -172,10 +166,8 @@ with sync_playwright() as p:
 
         click_visible_send_button(caption_box)
         time.sleep(1.5)
-        page.screenshot(path="debug_after_send.png")
 
     def process_entry(phone, message, file_path):
-        """Shared send logic: sends a file+caption if file_path is given, else plain text."""
         try:
             open_chat(phone)
             print(f"Chat opened: {phone}")
@@ -192,71 +184,45 @@ with sync_playwright() as p:
             time.sleep(random.uniform(3, 6))
         except Exception as e:
             print(f"FAILED for {phone}: {e}")
-            page.screenshot(path=f"error_{phone}.png")
 
-    # ---------------- CSV WATCH LOOP (detects delete + re-upload) ----------------
-    CSV_PATH = "numbers.csv"
-    POLL_SECONDS = 20
-
-    def read_rows():
-        """Read all current rows from the CSV. Returns a list of dicts."""
+    def process_csv_file(csv_path):
+        print(f"\nProcessing CSV: {csv_path}")
         try:
-            with open(CSV_PATH, encoding="utf-8-sig") as f:
-                return list(csv.DictReader(f))
-        except FileNotFoundError:
-            return []
+            with open(csv_path, encoding="utf-8-sig") as f:
+                rows = list(csv.DictReader(f))
+        except Exception as e:
+            print(f"Could not read {csv_path}: {e}")
+            return
 
-    def row_key(row):
-        """Unique-ish fingerprint for a row so we know if it's already been sent."""
-        return (
-            row.get("phone", "").strip(),
-            row.get("message", "").strip(),
-            row.get("file_path", "").strip(),
-        )
+        for row in rows:
+            phone = row.get("phone", "").strip()
+            message = row.get("message", "").strip()
+            file_path = row.get("file_path", "").strip()
 
-    sent_keys = set()
-    last_mtime = None
-    file_was_missing = True  # start as "missing" so the first sighting counts as fresh
+            if not phone:
+                continue
 
-    print(f"\nWatching {CSV_PATH} every {POLL_SECONDS}s.")
-    print("Delete and re-upload the file with the same name any time — new rows will be sent automatically.")
+            process_entry(phone, message, file_path)
+
+        print(f"Finished processing: {csv_path}")
+
+    # ---------------- FOLDER WATCH LOOP ----------------
+    print(f"\nWatching '{WATCH_DIR}' for .csv files every {POLL_SECONDS}s.")
+    print("Each .csv found is fully processed, then deleted, so only new uploads get sent.")
     print("Press Ctrl+C to stop and close the browser.\n")
 
     try:
         while True:
-            exists = os.path.exists(CSV_PATH)
+            csv_files = glob.glob(os.path.join(WATCH_DIR, "*.csv"))
 
-            if not exists:
-                if not file_was_missing:
-                    print(f"{CSV_PATH} was removed — waiting for a new upload...")
-                file_was_missing = True
-                last_mtime = None
-                time.sleep(POLL_SECONDS)
-                continue
+            for csv_path in csv_files:
+                process_csv_file(csv_path)
 
-            mtime = os.path.getmtime(CSV_PATH)
-
-            # File just reappeared (deleted -> re-uploaded) or was modified in place
-            if file_was_missing or last_mtime is None or mtime != last_mtime:
-                print(f"{CSV_PATH} detected as new/changed — treating its rows as fresh.")
-                sent_keys = set()
-                last_mtime = mtime
-                file_was_missing = False
-
-            rows = read_rows()
-            new_rows = [r for r in rows if row_key(r) not in sent_keys]
-
-            for row in new_rows:
-                phone = row.get("phone", "").strip()
-                message = row.get("message", "").strip()
-                file_path = row.get("file_path", "").strip()
-
-                if not phone:
-                    sent_keys.add(row_key(row))
-                    continue
-
-                process_entry(phone, message, file_path)
-                sent_keys.add(row_key(row))
+                try:
+                    os.remove(csv_path)
+                    print(f"Deleted {os.path.basename(csv_path)} after sending.")
+                except Exception as e:
+                    print(f"Could not delete {csv_path}: {e}")
 
             time.sleep(POLL_SECONDS)
     except KeyboardInterrupt:
