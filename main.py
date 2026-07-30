@@ -107,8 +107,8 @@ with sync_playwright() as p:
         get_active_textbox()
 
     def open_chat(phone):
-        if open_chat_via_search(phone):
-            return
+        # if open_chat_via_search(phone):
+        #     return
         open_chat_via_reload(phone)
 
     def click_visible_send_button(caption_box):
